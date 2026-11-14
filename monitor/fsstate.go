@@ -42,6 +42,10 @@ type FilesystemState struct {
 	Email     []string
 	Stdout    bool
 	errorMu   sync.Mutex
+	// notifyCertMu serializes the ledger check, delivery, and ledger update
+	// in NotifyCert so that concurrently-discovered copies of the same
+	// certificate (e.g. from different logs) are only notified about once.
+	notifyCertMu sync.Mutex
 }
 
 func (s *FilesystemState) logStateDir(logID LogID) string {
@@ -176,6 +180,9 @@ func (s *FilesystemState) LoadIssuer(ctx context.Context, fingerprint *[32]byte)
 }
 
 func (s *FilesystemState) NotifyCert(ctx context.Context, cert *DiscoveredCert) error {
+	s.notifyCertMu.Lock()
+	defer s.notifyCertMu.Unlock()
+
 	var (
 		tbsFingerprint  = hex.EncodeToString(cert.TBSSHA256[:])
 		certFingerprint = hex.EncodeToString(cert.SHA256[:])
@@ -184,6 +191,12 @@ func (s *FilesystemState) NotifyCert(ctx context.Context, cert *DiscoveredCert) 
 		tbsDir  = filepath.Join(s.StateDir, "certs", tbsFingerprint[0:2])
 		certDir = filepath.Join(s.StateDir, "certs", certFingerprint[0:2])
 	)
+
+	if notified, err := s.alreadyNotified(cert.WatchItem, cert.TBSSHA256); err != nil {
+		return fmt.Errorf("error checking notification ledger for certificate %x: %w", cert.SHA256, err)
+	} else if notified {
+		return nil
+	}
 
 	notifiedPath := filepath.Join(tbsDir, "."+tbsFingerprint+".notified")
 	if fileExists(notifiedPath) {
@@ -240,6 +253,12 @@ func (s *FilesystemState) NotifyCert(ctx context.Context, cert *DiscoveredCert) 
 		text:    certNotificationText(cert, paths),
 	}); err != nil {
 		return fmt.Errorf("error notifying about discovered certificate for %s (%x): %w", cert.WatchItem, cert.SHA256, err)
+	}
+
+	// The notification was delivered successfully; record it in the
+	// persistent ledger so it is never sent again, even across restarts.
+	if err := s.recordNotification(cert); err != nil {
+		return fmt.Errorf("error recording notification for certificate %x: %w", cert.SHA256, err)
 	}
 
 	if s.SaveCerts {
