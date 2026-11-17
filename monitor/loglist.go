@@ -11,7 +11,6 @@ package monitor
 
 import (
 	"context"
-	"fmt"
 	"software.sslmate.com/src/certspotter/cttypes"
 	"software.sslmate.com/src/certspotter/loglist"
 )
@@ -24,20 +23,16 @@ func getLogList(ctx context.Context, source string, pubkey []byte, token *loglis
 		return nil, nil, err
 	}
 
+	// loglist.LoadIfModified rejects duplicate log IDs (among other problems)
+	// before returning, so every log ID here is unique across all operators.
 	logs := make(map[LogID]*loglist.Log)
 	for operatorIndex := range list.Operators {
 		for logIndex := range list.Operators[operatorIndex].Logs {
 			log := &list.Operators[operatorIndex].Logs[logIndex]
-			if _, exists := logs[log.LogID]; exists {
-				return nil, nil, fmt.Errorf("log list contains more than one entry with ID %s", log.LogID.Base64String())
-			}
 			logs[log.LogID] = log
 		}
 		for logIndex := range list.Operators[operatorIndex].TiledLogs {
 			log := &list.Operators[operatorIndex].TiledLogs[logIndex]
-			if _, exists := logs[log.LogID]; exists {
-				return nil, nil, fmt.Errorf("log list contains more than one entry with ID %s", log.LogID.Base64String())
-			}
 			logs[log.LogID] = log
 		}
 	}

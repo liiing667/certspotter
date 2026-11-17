@@ -78,8 +78,11 @@ func (token *ModificationToken) setRequestHeaders(request *http.Request) {
 // The signature must be an RSA PKCS #1 v1.5 signature or an ASN.1
 // DER-encoded ECDSA signature over the SHA-256 hash of the JSON file.
 // The JSON log list must contain a log_list_timestamp that is no more
-// than 48 hours in the past, and if it contains a log_list_name, it must
-// equal the base name of the archive (e.g. "log_list" for log_list.zip).
+// than 48 hours in the past and not in the future, and if it contains a
+// log_list_name, it must equal the base name of the archive (e.g. "log_list"
+// for log_list.zip).  As with [Unmarshal], every log ID must be unique across
+// all operators and every log URL must be an absolute https:// URL; otherwise
+// the entire archive is rejected rather than partially loaded.
 func Load(ctx context.Context, urlOrFile string, pubkey []byte) (*List, error) {
 	list, _, err := LoadIfModified(ctx, urlOrFile, pubkey, nil)
 	return list, err
@@ -174,7 +177,9 @@ func Unmarshal(jsonBytes []byte) (*List, error) {
 // an RSA or ECDSA key. filename is the name of the archive, which is used to
 // determine the names of the JSON and signature files within the archive,
 // and the expected log_list_name.  The log list must contain a
-// log_list_timestamp that is no more than 48 hours in the past.
+// log_list_timestamp that is no more than 48 hours in the past and not in the
+// future.  The list is also fully validated (see [List.Validate]), so a list
+// with duplicate log IDs or invalid URLs is rejected as a whole.
 // See [Load] for details.
 func UnmarshalSigned(zipBytes []byte, filename string, pubkey []byte) (*List, error) {
 	return unmarshalSigned(zipBytes, filename, pubkey, time.Now())
