@@ -113,7 +113,10 @@ You can use Cert Spotter to detect:
 :   File containing DNS names to monitor, one per line.  To monitor an entire
     domain namespace (including the domain itself and all sub-domains) prefix
     the domain name with a dot (e.g. ".example.com").  To monitor a single DNS
-    name only, do not prefix the name with a dot.
+    name only, do not prefix the name with a dot.  To monitor an IP address,
+    prefix the address with `ip:` (e.g. "ip:192.0.2.1" or "ip:2001:db8::1").
+    A bare IP address without the `ip:` prefix is rejected as ambiguous, so
+    that an IP-only certificate can never be silently missed.
     
     Defaults to `$CERTSPOTTER_CONFIG_DIR/watchlist`, which is
     "~/.certspotter/watchlist" by default.

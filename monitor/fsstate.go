@@ -42,6 +42,7 @@ type FilesystemState struct {
 	Email     []string
 	Stdout    bool
 	errorMu   sync.Mutex
+	notifyMu  sync.Mutex
 }
 
 func (s *FilesystemState) logStateDir(logID LogID) string {
@@ -176,6 +177,11 @@ func (s *FilesystemState) LoadIssuer(ctx context.Context, fingerprint *[32]byte)
 }
 
 func (s *FilesystemState) NotifyCert(ctx context.Context, cert *DiscoveredCert) error {
+	// Serialize notifications so concurrent log workers can't both observe
+	// the absence of a notified marker and send duplicate notifications.
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+
 	var (
 		tbsFingerprint  = hex.EncodeToString(cert.TBSSHA256[:])
 		certFingerprint = hex.EncodeToString(cert.SHA256[:])
@@ -234,18 +240,25 @@ func (s *FilesystemState) NotifyCert(ctx context.Context, cert *DiscoveredCert) 
 		}
 	}
 
+	// Durably record the notification before invoking any notification hook,
+	// so a retry (including one after a hook failure or a crash) can never
+	// produce a duplicate notification.  The marker is written even with
+	// -no_save, which keeps state and evidence consistent across retries and
+	// watch list changes, and preserves the historical marker layout used by
+	// certspotter-authorize.
+	if err := os.Mkdir(tbsDir, 0777); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("error creating directory in which to save certificate %x: %w", cert.SHA256, err)
+	}
+	if err := writeFile(notifiedPath, nil, 0666); err != nil {
+		return fmt.Errorf("error saving certificate %x: %w", cert.SHA256, err)
+	}
+
 	if err := s.notify(ctx, &notification{
 		summary: certNotificationSummary(cert),
 		environ: certNotificationEnviron(cert, paths),
 		text:    certNotificationText(cert, paths),
 	}); err != nil {
 		return fmt.Errorf("error notifying about discovered certificate for %s (%x): %w", cert.WatchItem, cert.SHA256, err)
-	}
-
-	if s.SaveCerts {
-		if err := os.WriteFile(notifiedPath, nil, 0666); err != nil {
-			return fmt.Errorf("error saving certificate %x: %w", cert.SHA256, err)
-		}
 	}
 
 	return nil

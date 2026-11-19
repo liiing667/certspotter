@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"golang.org/x/net/idna"
 	"io"
+	"net"
 	"software.sslmate.com/src/certspotter"
 	"strings"
 )
@@ -21,6 +22,7 @@ import (
 type WatchItem struct {
 	domain       []string
 	acceptSuffix bool
+	ipaddr       net.IP // non-nil for IP address watch items; nil for DNS name watch items
 }
 
 type WatchList []WatchItem
@@ -49,10 +51,34 @@ func ParseWatchItem(str string) (WatchItem, error) {
 		}, nil
 	}
 
+	if strings.HasPrefix(domain, "ip:") {
+		// Explicit IP address watch item.  The "ip:" prefix is required so that
+		// bare IP literals in the watch list remain an unambiguous, fail-closed
+		// configuration error instead of silently matching as a DNS name.
+		ipaddr := net.ParseIP(domain[len("ip:"):])
+		if ipaddr == nil {
+			return WatchItem{}, fmt.Errorf("invalid IP address %q", domain)
+		}
+		return WatchItem{
+			ipaddr: canonicalWatchIP(ipaddr),
+		}, nil
+	}
+
+	if ipaddr := net.ParseIP(domain); ipaddr != nil {
+		// A bare IP literal is ambiguous: it could be intended as an IP address
+		// or as a (syntactically invalid) DNS name.  Fail closed rather than
+		// guessing, so an IP-only certificate can never be silently missed.
+		return WatchItem{}, fmt.Errorf("watch item %q looks like an IP address; use %q to watch an IP address", domain, "ip:"+ipaddr.String())
+	}
+
 	acceptSuffix := false
 	if strings.HasPrefix(domain, ".") {
 		acceptSuffix = true
 		domain = domain[1:]
+	}
+
+	if domain == "" {
+		return WatchItem{}, fmt.Errorf("empty domain")
 	}
 
 	asciiDomain, err := idna.ToASCII(strings.ToLower(strings.TrimRight(domain, ".")))
@@ -85,11 +111,25 @@ func ReadWatchList(reader io.Reader) (WatchList, error) {
 }
 
 func (item WatchItem) String() string {
+	if item.ipaddr != nil {
+		return "ip:" + item.ipaddr.String()
+	}
 	if item.acceptSuffix {
 		return "." + strings.Join(item.domain, ".")
 	} else {
 		return strings.Join(item.domain, ".")
 	}
+}
+
+func canonicalWatchIP(ipaddr net.IP) net.IP {
+	// Store every watched address in the same canonical 16-byte form used for
+	// certificate identifiers, so mapped and unmapped encodings of the same
+	// address share a single identity.
+	return ipaddr.To16()
+}
+
+func (item WatchItem) matchesIPAddr(ipaddr net.IP) bool {
+	return item.ipaddr != nil && item.ipaddr.Equal(ipaddr)
 }
 
 func (item WatchItem) matchesDNSName(dnsName []string) bool {
@@ -125,6 +165,14 @@ func (list WatchList) Matches(identifiers *certspotter.Identifiers) (bool, Watch
 		dnsNames[i] = strings.Split(dnsName, ".")
 	}
 	for _, item := range list {
+		if item.ipaddr != nil {
+			for _, ipaddr := range identifiers.IPAddrs {
+				if item.matchesIPAddr(ipaddr) {
+					return true, item
+				}
+			}
+			continue
+		}
 		for _, dnsName := range dnsNames {
 			if item.matchesDNSName(dnsName) {
 				return true, item

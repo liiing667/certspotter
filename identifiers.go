@@ -51,6 +51,21 @@ func parseIPAddrString(str string) net.IP {
 	return net.ParseIP(str)
 }
 
+// canonicalIPAddr returns the canonical 16-byte representation of an IP
+// address, so that IPv4 addresses and IPv4-mapped IPv6 addresses that denote
+// the same host compare identical regardless of their on-the-wire encoding.
+// It returns nil if the input is not a valid IP address.
+func canonicalIPAddr(ipaddr net.IP) net.IP {
+	if ipaddr == nil {
+		return nil
+	}
+	canonical := ipaddr.To16()
+	if canonical == nil {
+		return nil
+	}
+	return canonical
+}
+
 func isASCIIString(value []byte) bool {
 	for _, b := range value {
 		if b > 127 {
@@ -148,7 +163,8 @@ func (ids *Identifiers) appendDNSName(dnsName string) {
 	}
 }
 func (ids *Identifiers) appendIPAddress(ipaddr net.IP) {
-	if !ids.hasIPAddress(ipaddr) {
+	ipaddr = canonicalIPAddr(ipaddr)
+	if ipaddr != nil && !ids.hasIPAddress(ipaddr) {
 		ids.IPAddrs = append(ids.IPAddrs, ipaddr)
 	}
 }
