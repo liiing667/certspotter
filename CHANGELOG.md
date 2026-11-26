@@ -1,5 +1,15 @@
 # Change Log
 
+## Unreleased
+- Reject a signed log list whose `log_list_timestamp` is more than 24 hours
+  in the future, in addition to the existing rejection of lists more than
+  48 hours in the past.  This prevents a list signed far in advance from
+  being replayed.
+- Reject any log list in which the same log ID (the SHA-256 hash of the log
+  key) is assigned to more than one operator, including across the `logs`
+  and `tiled_logs` arrays.  Previously this was only detected by the
+  monitor, with an error that did not identify the conflicting operators.
+
 ## v0.26.2 (2026-10-29)
 - Add v0.26.1 changelog entry that was mistakenly excluded from the release.
 

@@ -197,6 +197,86 @@ func TestUnmarshalJSON(t *testing.T) {
 	})
 }
 
+// testLog returns a valid log whose key hashes to its LogID.
+func testLog(description string) Log {
+	key := []byte("not a real log key: " + description)
+	return Log{
+		Key:         key,
+		LogID:       sha256.Sum256(key),
+		MMD:         86400,
+		URL:         "https://ct.example.com/" + description + "/",
+		Description: description,
+	}
+}
+
+func TestValidateDuplicateLogID(t *testing.T) {
+	// The same log identity must not be assigned to more than one
+	// operator, even across the logs and tiled_logs arrays.
+	sharedLog := testLog("shared log")
+
+	t.Run("DifferentOperators", func(t *testing.T) {
+		list := &List{
+			Version:          "test",
+			LogListTimestamp: time.Now(),
+			Operators: []Operator{
+				{Name: "Operator A", Logs: []Log{sharedLog}},
+				{Name: "Operator B", Logs: []Log{testLog("other log"), sharedLog}},
+			},
+		}
+		err := list.Validate()
+		if err == nil || !strings.Contains(err.Error(), "more than one operator") {
+			t.Fatalf("got error %v, want error about a log ID assigned to more than one operator", err)
+		}
+		if !strings.Contains(err.Error(), "Operator A") || !strings.Contains(err.Error(), "Operator B") {
+			t.Fatalf("error %q does not name both operators", err)
+		}
+	})
+
+	t.Run("TiledAndNonTiled", func(t *testing.T) {
+		list := &List{
+			Version:          "test",
+			LogListTimestamp: time.Now(),
+			Operators: []Operator{{
+				Name:      "Operator A",
+				Logs:      []Log{sharedLog},
+				TiledLogs: []Log{sharedLog},
+			}},
+		}
+		if err := list.Validate(); err == nil || !strings.Contains(err.Error(), "more than one operator") {
+			t.Fatalf("got error %v, want duplicate log ID error", err)
+		}
+	})
+
+	t.Run("UniqueIDsAreValid", func(t *testing.T) {
+		list := &List{
+			Version:          "test",
+			LogListTimestamp: time.Now(),
+			Operators: []Operator{{
+				Name:      "Operator A",
+				Logs:      []Log{testLog("log 1")},
+				TiledLogs: []Log{testLog("log 2")},
+			}},
+		}
+		if err := list.Validate(); err != nil {
+			t.Fatalf("list with unique log IDs should be valid: %v", err)
+		}
+	})
+
+	t.Run("RejectedWhenSigned", func(t *testing.T) {
+		privkey := generateECDSAKey(t)
+		pubkey := marshalPubkey(t, privkey)
+		list := testList()
+		list.Operators = append(list.Operators, Operator{
+			Name: "Second Operator",
+			Logs: []Log{list.Operators[0].Logs[0]},
+		})
+		zipBytes := makeSignedZipJSON(t, privkey, "log_list", marshalList(t, list))
+		if _, err := UnmarshalSigned(zipBytes, "log_list.zip", pubkey); err == nil {
+			t.Fatal("signed log list with a duplicated log ID across operators should be rejected")
+		}
+	})
+}
+
 func TestUnmarshalSignedListName(t *testing.T) {
 	privkey := generateECDSAKey(t)
 	pubkey := marshalPubkey(t, privkey)
@@ -216,6 +296,8 @@ func TestUnmarshalSignedListName(t *testing.T) {
 		checkTestList(t, list)
 	}
 
+	// A name claiming a different archive (e.g. a list signed for another
+	// environment) must not be accepted under this archive's name.
 	_, err := UnmarshalSigned(signedZip(t, "all_logs_list"), "log_list.zip", pubkey)
 	if err == nil || !strings.Contains(err.Error(), "log_list_name") {
 		t.Fatalf("got error %v, want error about log_list_name", err)
@@ -239,6 +321,12 @@ func TestUnmarshalSignedTimestamp(t *testing.T) {
 	}
 
 	_, err := unmarshalSigned(zipBytes, "log_list.zip", pubkey, timestamp.Add(maxSignedListAge+time.Second))
+	checkInvalidTimestamp(t, err)
+
+	// A timestamp too far in the future must be rejected too: otherwise a
+	// list signed far in advance could be replayed long after it should
+	// have expired.
+	_, err = unmarshalSigned(zipBytes, "log_list.zip", pubkey, timestamp.Add(-maxSignedListFutureSkew-time.Second))
 	checkInvalidTimestamp(t, err)
 
 	t.Run("Missing", func(t *testing.T) {
