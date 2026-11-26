@@ -73,6 +73,9 @@ You can use Cert Spotter to detect:
 :   Do not save a copy of matching certificates. Note that enabling this option
     will cause you to receive duplicate notifications, since certspotter will
     have no way of knowing if you've been previously notified about a certificate.
+    Until a notification has been delivered, certspotter may nevertheless keep a
+    short-lived recovery record under the state directory so an interrupted
+    process can replay it after restart.
 
 -script *COMMAND*
 

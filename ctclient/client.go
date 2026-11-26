@@ -61,6 +61,12 @@ func NewHTTPClient(dialContext func(context.Context, string, string) (net.Conn, 
 
 var defaultHTTPClient = NewHTTPClient(nil)
 
+// ErrResponseTooLarge is wrapped by errors returned when a log response
+// exceeds the client's bounded response size.  Callers can use errors.Is to
+// distinguish a deterministic oversized response from transient transport
+// errors.
+var ErrResponseTooLarge = errors.New("response body is too large")
+
 // maxResponseBytes is a generous upper bound on the size of an HTTP response
 // body that we are willing to buffer in memory.
 const maxResponseBytes = 64 << 20 // 64 MiB
@@ -76,7 +82,7 @@ func readResponseBody(r io.Reader, maxBytes int64) ([]byte, error) {
 		return nil, fmt.Errorf("error reading response: %w", err)
 	}
 	if int64(len(body)) > maxBytes {
-		return nil, fmt.Errorf("response body exceeds maximum allowed size of %d bytes", maxBytes)
+		return nil, fmt.Errorf("%w: response body exceeds maximum allowed size of %d bytes", ErrResponseTooLarge, maxBytes)
 	}
 	return body, nil
 }

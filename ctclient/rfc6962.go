@@ -23,6 +23,35 @@ import (
 	"software.sslmate.com/src/certspotter/merkletree"
 )
 
+// sizeLimitedReader caps the number of bytes read while preserving an
+// ErrResponseTooLarge cause.  It permits one byte beyond the configured limit
+// so an exactly-limit-sized body remains distinguishable from an oversized
+// body.
+type sizeLimitedReader struct {
+	r         io.Reader
+	limit     int64
+	remaining int64
+}
+
+func newSizeLimitedReader(r io.Reader, limit int64) *sizeLimitedReader {
+	return &sizeLimitedReader{r: r, limit: limit, remaining: limit + 1}
+}
+
+func (lr *sizeLimitedReader) Read(p []byte) (int, error) {
+	if lr.remaining <= 0 {
+		return 0, fmt.Errorf("%w: response body exceeds maximum allowed size of %d bytes", ErrResponseTooLarge, lr.limit)
+	}
+	if int64(len(p)) > lr.remaining {
+		p = p[:lr.remaining]
+	}
+	n, err := lr.r.Read(p)
+	lr.remaining -= int64(n)
+	if lr.remaining <= 0 {
+		return n, fmt.Errorf("%w: response body exceeds maximum allowed size of %d bytes", ErrResponseTooLarge, lr.limit)
+	}
+	return n, err
+}
+
 type RFC6962Log struct {
 	URL        *url.URL
 	HTTPClient *http.Client // nil to use default client
@@ -64,7 +93,7 @@ func (ctlog *RFC6962Log) getEntries(ctx context.Context, startInclusive uint64, 
 	}
 	defer body.Close()
 
-	limitedBody := io.LimitReader(body, maxResponseBytes)
+	limitedBody := newSizeLimitedReader(body, maxResponseBytes)
 	dec := json.NewDecoder(limitedBody)
 	if tok, err := dec.Token(); err != nil {
 		return nil, fmt.Errorf("Get %q: error reading JSON object token: %w", fullURL, err)

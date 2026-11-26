@@ -100,6 +100,12 @@ func withRetry(ctx context.Context, config *Config, ctlog *loglist.Log, maxRetri
 			recordError(ctx, config, ctlog, err)
 			return nil
 		}
+		if errors.Is(err, ctclient.ErrResponseTooLarge) {
+			// Retrying the same range cannot help: the response is
+			// deterministically over the bounded size.  Let getEntriesFull
+			// split the range into smaller requests.
+			return err
+		}
 		if maxRetries != -1 && numRetries >= maxRetries {
 			return err
 		}
@@ -119,7 +125,38 @@ func getEntriesFull(ctx context.Context, client ctclient.Log, startInclusive, en
 	for startInclusive < endExclusive {
 		entries, err := client.GetEntries(ctx, startInclusive, endExclusive-1)
 		if err != nil {
+			if len(entries) > 0 {
+				allEntries = append(allEntries, entries...)
+				startInclusive += uint64(len(entries))
+			}
+			if errors.Is(err, ctclient.ErrResponseTooLarge) {
+				if startInclusive >= endExclusive {
+					return allEntries, nil
+				}
+				if len(entries) > 0 {
+					// The decoder made forward progress before hitting the
+					// size cap.  Continue with the next index.
+					continue
+				}
+				if endExclusive-startInclusive > 1 {
+					mid := startInclusive + (endExclusive-startInclusive)/2
+					leftEntries, leftErr := getEntriesFull(ctx, client, startInclusive, mid)
+					if leftErr != nil {
+						return nil, leftErr
+					}
+					rightEntries, rightErr := getEntriesFull(ctx, client, mid, endExclusive)
+					if rightErr != nil {
+						return nil, rightErr
+					}
+					allEntries = append(allEntries, leftEntries...)
+					allEntries = append(allEntries, rightEntries...)
+					return allEntries, nil
+				}
+			}
 			return nil, err
+		}
+		if len(entries) == 0 {
+			return nil, fmt.Errorf("GetEntries(%d, %d) returned zero entries without an error", startInclusive, endExclusive-1)
 		}
 		allEntries = append(allEntries, entries...)
 		startInclusive += uint64(len(entries))

@@ -11,7 +11,6 @@ package monitor
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -34,14 +33,15 @@ const keepErrorDays = 7
 const errorDateFormat = "2006-01-02"
 
 type FilesystemState struct {
-	StateDir  string
-	CacheDir  string
-	SaveCerts bool
-	Script    string
-	ScriptDir string
-	Email     []string
-	Stdout    bool
-	errorMu   sync.Mutex
+	StateDir    string
+	CacheDir    string
+	SaveCerts   bool
+	Script      string
+	ScriptDir   string
+	Email       []string
+	Stdout      bool
+	errorMu     sync.Mutex
+	notifyLocks [256]sync.Mutex
 }
 
 func (s *FilesystemState) logStateDir(logID LogID) string {
@@ -52,10 +52,10 @@ func (s *FilesystemState) Prepare(ctx context.Context) error {
 	if err := prepareStateDir(s.StateDir); err != nil {
 		return err
 	}
-	if err := prepareCacheDir(s.CacheDir); err != nil {
-		return err
+	if err := s.RecoverPendingNotifications(ctx); err != nil {
+		return fmt.Errorf("error recovering pending certificate notifications: %w", err)
 	}
-	return nil
+	return prepareCacheDir(s.CacheDir)
 }
 
 func (s *FilesystemState) PrepareLog(ctx context.Context, logID LogID) error {
@@ -176,6 +176,9 @@ func (s *FilesystemState) LoadIssuer(ctx context.Context, fingerprint *[32]byte)
 }
 
 func (s *FilesystemState) NotifyCert(ctx context.Context, cert *DiscoveredCert) error {
+	unlockNotification := s.lockCertNotification(cert.TBSSHA256)
+	defer unlockNotification()
+
 	var (
 		tbsFingerprint  = hex.EncodeToString(cert.TBSSHA256[:])
 		certFingerprint = hex.EncodeToString(cert.SHA256[:])
@@ -184,9 +187,13 @@ func (s *FilesystemState) NotifyCert(ctx context.Context, cert *DiscoveredCert) 
 		tbsDir  = filepath.Join(s.StateDir, "certs", tbsFingerprint[0:2])
 		certDir = filepath.Join(s.StateDir, "certs", certFingerprint[0:2])
 	)
+	pendingPath := s.pendingNotificationPath(tbsFingerprint)
 
 	notifiedPath := filepath.Join(tbsDir, "."+tbsFingerprint+".notified")
 	if fileExists(notifiedPath) {
+		if err := os.Remove(pendingPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("error removing stale pending notification for certificate %x: %w", cert.TBSSHA256, err)
+		}
 		return nil
 	}
 	// previous versions of certspotter used these files to record that a notification was sent
@@ -196,16 +203,19 @@ func (s *FilesystemState) NotifyCert(ctx context.Context, cert *DiscoveredCert) 
 		certFingerprint + ".precert.pem",
 	} {
 		if fileExists(filepath.Join(certDir, filename)) {
+			if err := os.Remove(pendingPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("error removing stale pending notification for certificate %x: %w", cert.SHA256, err)
+			}
 			return nil
 		}
 	}
 
 	var paths *certPaths
 	if s.SaveCerts {
-		if err := os.Mkdir(tbsDir, 0777); err != nil && !errors.Is(err, fs.ErrExist) {
+		if err := os.MkdirAll(tbsDir, 0777); err != nil {
 			return fmt.Errorf("error creating directory in which to save certificate %x: %w", cert.SHA256, err)
 		}
-		if err := os.Mkdir(certDir, 0777); err != nil && !errors.Is(err, fs.ErrExist) {
+		if err := os.MkdirAll(certDir, 0777); err != nil {
 			return fmt.Errorf("error creating directory in which to save certificate %x: %w", cert.SHA256, err)
 		}
 		paths = &certPaths{
@@ -220,9 +230,9 @@ func (s *FilesystemState) NotifyCert(ctx context.Context, cert *DiscoveredCert) 
 		paths = &certPaths{
 			temporary: true,
 
-			certPath: filepath.Join(os.TempDir(), "certspotter-"+rand.Text()+".pem"),
-			jsonPath: filepath.Join(os.TempDir(), "certspotter-"+rand.Text()+".v1.json"),
-			textPath: filepath.Join(os.TempDir(), "certspotter-"+rand.Text()+".txt"),
+			certPath: filepath.Join(os.TempDir(), "certspotter-"+randomFileSuffix()+".pem"),
+			jsonPath: filepath.Join(os.TempDir(), "certspotter-"+randomFileSuffix()+".v1.json"),
+			textPath: filepath.Join(os.TempDir(), "certspotter-"+randomFileSuffix()+".txt"),
 		}
 		defer func() {
 			os.Remove(paths.certPath)
@@ -233,19 +243,33 @@ func (s *FilesystemState) NotifyCert(ctx context.Context, cert *DiscoveredCert) 
 			return fmt.Errorf("error saving certificate %x to temporary files: %w", cert.SHA256, err)
 		}
 	}
+	var pendingFiles []pendingNotificationFile
+	if !s.SaveCerts {
+		for _, path := range []string{paths.certPath, paths.jsonPath, paths.textPath} {
+			file, err := readPendingNotificationFile(path)
+			if err != nil {
+				return fmt.Errorf("error reading temporary certificate file %s for recovery journal: %w", path, err)
+			}
+			pendingFiles = append(pendingFiles, file)
+		}
+	}
 
-	if err := s.notify(ctx, &notification{
+	notif := &notification{
 		summary: certNotificationSummary(cert),
 		environ: certNotificationEnviron(cert, paths),
 		text:    certNotificationText(cert, paths),
-	}); err != nil {
+	}
+	record := newPendingNotificationRecord(cert, notif, s.SaveCerts, pendingFiles)
+	if err := s.savePendingNotification(record); err != nil {
+		return fmt.Errorf("error persisting pending notification for certificate %x: %w", cert.SHA256, err)
+	}
+
+	if err := s.notify(ctx, notif); err != nil {
 		return fmt.Errorf("error notifying about discovered certificate for %s (%x): %w", cert.WatchItem, cert.SHA256, err)
 	}
 
-	if s.SaveCerts {
-		if err := os.WriteFile(notifiedPath, nil, 0666); err != nil {
-			return fmt.Errorf("error saving certificate %x: %w", cert.SHA256, err)
-		}
+	if err := s.completePendingNotification(record); err != nil {
+		return fmt.Errorf("error completing notification for certificate %x: %w", cert.SHA256, err)
 	}
 
 	return nil

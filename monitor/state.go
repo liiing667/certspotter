@@ -72,6 +72,12 @@ type StateProvider interface {
 	LoadIssuer(context.Context, *[32]byte) ([]byte, error)
 
 	// Called when a certificate matching the watch list is discovered.
+	// Implementations should treat a nil return as "the notification has
+	// been durably accepted or delivered".  The monitor does not advance log
+	// scan progress past the entry until this method returns successfully, so
+	// a state implementation that needs crash recovery should persist a
+	// write-ahead notification record before contacting external sinks and
+	// replay/complete that record after a restart.
 	NotifyCert(context.Context, *DiscoveredCert) error
 
 	// Called when certspotter fails to parse a log entry.
