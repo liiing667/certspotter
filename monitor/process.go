@@ -27,6 +27,17 @@ type LogEntry struct {
 	Log   *loglist.Log
 }
 
+// ProcessLogEntry verifies and processes one downloaded CT log entry.  It is
+// the exported form of the monitor's internal processing boundary.
+func ProcessLogEntry(ctx context.Context, config *Config, issuerGetter ctclient.IssuerGetter, entry *LogEntry) error {
+	return processLogEntry(ctx, config, issuerGetter, entry)
+}
+
+// ProcessEntry is a concise alias for ProcessLogEntry.
+func ProcessEntry(ctx context.Context, config *Config, issuerGetter ctclient.IssuerGetter, entry *LogEntry) error {
+	return ProcessLogEntry(ctx, config, issuerGetter, entry)
+}
+
 func processLogEntry(ctx context.Context, config *Config, issuerGetter ctclient.IssuerGetter, entry *LogEntry) error {
 	leaf, err := cttypes.ParseLeafInput(entry.LeafInput())
 	if err != nil {
@@ -77,6 +88,10 @@ func processPrecertLogEntry(ctx context.Context, config *Config, issuerGetter ct
 	if err != nil {
 		return processMalformedLogEntry(ctx, config, entry, fmt.Errorf("error getting precert entry's precertificate: %w", err))
 	}
+	if validationErr := VerifyPrecertIdentity(precertBytes, precert.TBSCertificate); validationErr != nil {
+		mismatch := newIdentityMismatchError(precertBytes, precert.TBSCertificate, validationErr)
+		return processIdentityMismatch(ctx, config, entry, mismatch)
+	}
 
 	getChain := func(ctx context.Context) ([]cttypes.ASN1Cert, error) {
 		var (
@@ -89,7 +104,8 @@ func processPrecertLogEntry(ctx context.Context, config *Config, issuerGetter ct
 			errs = append(errs, err)
 		}
 		if _, err := certspotter.ValidatePrecert(precertBytes, precert.TBSCertificate); err != nil {
-			errs = append(errs, fmt.Errorf("precertificate in extra_data does not match TBSCertificate in leaf_input: %w", err))
+			mismatch := newIdentityMismatchError(precertBytes, precert.TBSCertificate, err)
+			errs = append(errs, fmt.Errorf("precertificate in extra_data does not match TBSCertificate in leaf_input: %w", mismatch))
 		}
 		return chain, errors.Join(errs...)
 	}
@@ -128,6 +144,36 @@ func processCertificate(ctx context.Context, config *Config, entry *LogEntry, ce
 		SHA256:       sha256.Sum256(chain[0]),
 		PubkeySHA256: sha256.Sum256(certInfo.TBS.PublicKey.FullBytes),
 		Identifiers:  identifiers,
+		// Precert entries have passed ValidatePrecert above.  X.509 entries
+		// are parsed from the exact DER certificate and ReconstructPrecertTBS
+		// only removes SCT extension data from that same parsed TBS.
+		IdentityVerified: true,
+	}
+
+	if identityErr := cert.ValidateIdentity(); identityErr != nil {
+		mismatch, _ := AsIdentityMismatch(identityErr)
+		if mismatch == nil {
+			mismatch = &IdentityMismatchError{
+				TBSSHA256:            cert.TBSSHA256,
+				PrecertificateSHA256: cert.SHA256,
+				Reason:               identityErr,
+			}
+		}
+		return processIdentityMismatch(ctx, config, entry, mismatch)
+	}
+
+	// A state implementation that persists identity verdicts gets a chance to
+	// suppress an exact certificate/TBS pair already rejected.  Keying by both
+	// hashes means a later, genuinely different certificate is not blocked by
+	// a rejection for another concrete certificate under the same TBS hash.
+	if conflicts, ok := config.State.(IdentityConflictLoader); ok {
+		prior, err := conflicts.LoadIdentityConflict(ctx, identityRefForCert(cert))
+		if err != nil {
+			return fmt.Errorf("error checking identity state for certificate %x: %w", cert.SHA256, err)
+		}
+		if prior != nil {
+			return nil
+		}
 	}
 
 	if err := config.State.NotifyCert(ctx, cert); err != nil {
@@ -135,6 +181,26 @@ func processCertificate(ctx context.Context, config *Config, entry *LogEntry, ce
 	}
 
 	return nil
+}
+
+func processIdentityMismatch(ctx context.Context, config *Config, entry *LogEntry, mismatch *IdentityMismatchError) error {
+	if config.State != nil {
+		if recorder, ok := config.State.(IdentityConflictRecorder); ok {
+			conflict := &IdentityConflict{
+				Ref: IdentityRef{
+					TBSSHA256:         mismatch.TBSSHA256,
+					CertificateSHA256: mismatch.PrecertificateSHA256,
+				},
+				Reason:     mismatch,
+				LogID:      entry.Log.LogID,
+				EntryIndex: entry.Index,
+			}
+			if err := recorder.RecordIdentityConflict(ctx, conflict); err != nil {
+				return fmt.Errorf("error persisting identity rejection for leaf TBS %x: %w", mismatch.TBSSHA256, err)
+			}
+		}
+	}
+	return processMalformedLogEntry(ctx, config, entry, mismatch)
 }
 
 func processMalformedLogEntry(ctx context.Context, config *Config, entry *LogEntry, parseError error) error {

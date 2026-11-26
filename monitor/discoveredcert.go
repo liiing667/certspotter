@@ -31,6 +31,15 @@ type DiscoveredCert struct {
 	SHA256       [32]byte           // computed over Chain[0]
 	PubkeySHA256 [32]byte           // computed over Info.TBS.PublicKey.FullBytes
 	Identifiers  *certspotter.Identifiers
+
+	// IdentityVerified is true when the concrete certificate/precertificate
+	// has been cryptographically checked against the signed TBS identity.
+	IdentityVerified bool
+
+	// IdentityError contains a definitive identity-binding failure.  Such a
+	// certificate must not be published through the trusted discovered-cert
+	// stream even if a TBS deduplication/authorization marker already exists.
+	IdentityError error
 }
 
 type certPaths struct {
@@ -59,10 +68,11 @@ func (cert *DiscoveredCert) pemChain() []byte {
 
 func (cert *DiscoveredCert) json() any {
 	object := map[string]any{
-		"tbs_sha256":    hex.EncodeToString(cert.TBSSHA256[:]),
-		"pubkey_sha256": hex.EncodeToString(cert.PubkeySHA256[:]),
-		"dns_names":     cert.Identifiers.DNSNames,
-		"ip_addresses":  cert.Identifiers.IPAddrs,
+		"tbs_sha256":        hex.EncodeToString(cert.TBSSHA256[:]),
+		"pubkey_sha256":     hex.EncodeToString(cert.PubkeySHA256[:]),
+		"dns_names":         cert.Identifiers.DNSNames,
+		"ip_addresses":      cert.Identifiers.IPAddrs,
+		"identity_verified": cert.IdentityVerified && cert.IdentityConsistent(),
 	}
 
 	if cert.Info.ValidityParseError == nil {
@@ -102,6 +112,14 @@ func certNotificationEnviron(cert *DiscoveredCert, paths *certPaths) []string {
 		"FINGERPRINT=" + hex.EncodeToString(cert.SHA256[:]), // backwards compat with pre-0.15.0; not documented
 		"PUBKEY_SHA256=" + hex.EncodeToString(cert.PubkeySHA256[:]),
 		"PUBKEY_HASH=" + hex.EncodeToString(cert.PubkeySHA256[:]), // backwards compat with pre-0.15.0; not documented
+	}
+	if cert.IdentityVerified {
+		env = append(env, "IDENTITY_VERIFIED=yes")
+	} else {
+		env = append(env, "IDENTITY_VERIFIED=unknown")
+	}
+	if identityErr := cert.ValidateIdentity(); identityErr != nil {
+		env = append(env, "IDENTITY_ERROR="+identityErr.Error())
 	}
 
 	if paths != nil {

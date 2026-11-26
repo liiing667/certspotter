@@ -176,6 +176,10 @@ func (s *FilesystemState) LoadIssuer(ctx context.Context, fingerprint *[32]byte)
 }
 
 func (s *FilesystemState) NotifyCert(ctx context.Context, cert *DiscoveredCert) error {
+	if err := s.checkCertIdentityAllowed(ctx, cert); err != nil {
+		return err
+	}
+
 	var (
 		tbsFingerprint  = hex.EncodeToString(cert.TBSSHA256[:])
 		certFingerprint = hex.EncodeToString(cert.SHA256[:])
@@ -285,6 +289,13 @@ func (s *FilesystemState) NotifyMalformedEntry(ctx context.Context, entry *LogEn
 		"ENTRY_FILENAME=" + entryPath,
 		"TEXT_FILENAME=" + textPath,
 		"CERT_PARSEABLE=no", // backwards compat with pre-0.15.0; not documented
+	}
+	if mismatch, ok := AsIdentityMismatch(parseError); ok {
+		environ = append(environ,
+			"IDENTITY_MISMATCH=yes",
+			"TBS_SHA256="+hex.EncodeToString(mismatch.TBSSHA256[:]),
+			"PRECERT_SHA256="+hex.EncodeToString(mismatch.PrecertificateSHA256[:]),
+		)
 	}
 
 	if err := s.notify(ctx, &notification{

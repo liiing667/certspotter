@@ -73,6 +73,12 @@ The following environment variables are set for `discovered_cert` events:
 
 :    The hex-encoded SHA-256 digest of the certificate's Subject Public Key Info.
 
+`IDENTITY_VERIFIED`
+
+:    `yes` when certspotter has verified that the concrete certificate or
+     precertificate matches the signed TBS identity in the Merkle leaf input.
+     This verifies identity binding, not chain trust or revocation status.
+
 `CERT_FILENAME`
 
 :    Path to a file containing the PEM-encoded certificate chain.  When `-no_save` is used, this points to a temporary file that is automatically deleted after your script completes.
@@ -148,6 +154,12 @@ The following environment variables are set for `malformed_cert` events:
 
 :    A human-readable string describing why the certificate is malformed.
 
+`IDENTITY_MISMATCH`
+
+:    Set to `yes` when a precertificate entry's `extra_data` precertificate does
+     not match the TBSCertificate in `leaf_input`.  `TBS_SHA256` and
+     `PRECERT_SHA256` contain the two conflicting identities.
+
 `ENTRY_FILENAME`
 
 :    Path to a file containing the JSON log entry.  The file contains a JSON object with two fields, `leaf_input` and `extra_data`, as described in RFC 6962 Section 4.6.
@@ -182,6 +194,11 @@ The JSON file contains an object with the following fields:
 `pubkey_sha256`
 
 :    A string containing the hex-encoded SHA-256 digest of the certificate's Subject Public Key Info.
+
+`identity_verified`
+
+:    A boolean indicating whether the concrete certificate/precertificate
+     matches the signed TBS identity in the Merkle leaf input.
 
 `dns_names`
 

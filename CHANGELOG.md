@@ -1,5 +1,12 @@
 # Change Log
 
+## Unreleased
+- Reject precertificate entries where the precertificate in `extra_data` does
+  not match the TBSCertificate in `leaf_input` before they enter the
+  discovered-certificate stream.  Persist an immutable identity-conflict record
+  keyed by both TBS and certificate hashes so deduplication or authorization
+  markers cannot override the identity rejection.
+
 ## v0.26.2 (2026-10-29)
 - Add v0.26.1 changelog entry that was mistakenly excluded from the release.
 
